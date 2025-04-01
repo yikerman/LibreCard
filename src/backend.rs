@@ -3,7 +3,8 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
-use xxhash_rust::xxh3::Xxh3;
+use std::hash::Hasher;
+use twox_hash::XxHash3_64;
 
 type SharedCopyProgress = Arc<Mutex<CopyProgress>>;
 
@@ -170,12 +171,10 @@ impl ChecksumReport {
 }
 
 pub fn xxh3_hash_file<P: AsRef<Path>>(path: P) -> io::Result<u64> {
-    // Open the file
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(1024 * 1024 * 8, file); // 8MB buffer
 
-    // Create XXH3 hasher
-    let mut hasher = Xxh3::new();
+    let mut hasher = XxHash3_64::new();
 
     // Process the file in chunks
     let mut buffer = [0u8; 1024 * 1024]; // 1MB buffer
@@ -184,9 +183,9 @@ pub fn xxh3_hash_file<P: AsRef<Path>>(path: P) -> io::Result<u64> {
         if bytes_read == 0 {
             break;
         }
-        hasher.update(&buffer[..bytes_read]);
+        hasher.write(&buffer[..bytes_read]);
     }
-
-    // Get the final hash
-    Ok(hasher.digest())
+    
+    let hash = hasher.finish();
+    Ok(hash)
 }
