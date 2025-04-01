@@ -11,5 +11,3 @@ twox-hash = "2.1.0"
 
 eframe = { version = "0.31.1", features = ["default"] }
 rfd = "0.15.3"
-
-env_logger = { version = "0.11.7", features = ["color", "humantime"] }
