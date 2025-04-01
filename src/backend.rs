@@ -1,9 +1,9 @@
 ﻿use std::fs::File;
+use std::hash::Hasher;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
-use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
 type SharedCopyProgress = Arc<Mutex<CopyProgress>>;
@@ -185,7 +185,7 @@ pub fn xxh3_hash_file<P: AsRef<Path>>(path: P) -> io::Result<u64> {
         }
         hasher.write(&buffer[..bytes_read]);
     }
-    
+
     let hash = hasher.finish();
     Ok(hash)
 }

@@ -33,16 +33,10 @@ fn main() -> Result<(), eframe::Error> {
             creation_context.egui_ctx.add_font(FontInsert::new(
                 "Source Han Sans SC",
                 FontData::from_static(include_bytes!("../static/SourceHanSansSC-Regular.otf")),
-                vec![
-                    InsertFontFamily {
-                        family: egui::FontFamily::Proportional,
-                        priority: egui::epaint::text::FontPriority::Highest,
-                    },
-                    InsertFontFamily {
-                        family: egui::FontFamily::Monospace,
-                        priority: egui::epaint::text::FontPriority::Lowest,
-                    },
-                ],
+                vec![InsertFontFamily {
+                    family: egui::FontFamily::Proportional,
+                    priority: egui::epaint::text::FontPriority::Highest,
+                }],
             ));
 
             Ok(Box::new(LibreCardApp::default()))
