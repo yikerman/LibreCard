@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 
-twox-hash = "2.1.0"
+xxhash-rust = {version = "0.8.15", features = ["xxh3", "std"]}
 
 eframe = { version = "0.31.1", features = ["default"] }
 rfd = "0.15.3"

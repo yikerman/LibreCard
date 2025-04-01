@@ -78,11 +78,18 @@ impl App for LibreCardApp {
             if let Some(progress) = self.progress.clone() {
                 let progress = progress.lock().unwrap();
                 match &*progress {
-                    CopyProgress::Normal { total, copied } => {
+                    CopyProgress::Copy { total, copied } => {
                         ui.label(format!("拷贝中... {}/{}", copied, total));
                     }
-                    CopyProgress::Finished { total } => {
-                        ui.label(format!("完成拷贝 {} 个文件", total));
+                    CopyProgress::Checksum { total, completed } => {
+                        ui.label(format!("校验中... {}/{}", completed, total));
+                    }
+                    CopyProgress::Finished { report } => {
+                        ui.label(format!(
+                            "完成拷贝 {} 个文件，有 {} 个错误",
+                            report.total_files(),
+                            report.count_errors()
+                        ));
                         start_button = true;
                     }
                     CopyProgress::Error { error } => {
@@ -99,7 +106,7 @@ impl App for LibreCardApp {
                     if let (Some(source), Some(destination)) =
                         (self.source_path.clone(), self.destination_path.clone())
                     {
-                        let progress = Arc::new(Mutex::new(CopyProgress::Normal {
+                        let progress = Arc::new(Mutex::new(CopyProgress::Copy {
                             total: 0,
                             copied: 0,
                         }));
