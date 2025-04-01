@@ -1,14 +1,17 @@
-﻿use crate::backend::{CopyProgress, copy_dir_threaded};
+﻿use crate::backend::{ChecksumReport, CopyProgress, copy_dir_threaded};
+use csv::Writer;
 use eframe::egui::Context;
 use eframe::{App, Frame, egui};
 use rfd::FileDialog;
-use std::path::PathBuf;
+use std::error::Error;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub struct LibreCardApp {
     source_path: Option<PathBuf>,
     destination_path: Option<PathBuf>,
-    input_error: Option<String>,
+    info: Option<String>,
     progress: Option<Arc<Mutex<CopyProgress>>>,
 }
 
@@ -17,7 +20,7 @@ impl Default for LibreCardApp {
         Self {
             source_path: None,
             destination_path: None,
-            input_error: None,
+            info: None,
             progress: None,
         }
     }
@@ -41,7 +44,7 @@ impl App for LibreCardApp {
                         egui::TextEdit::singleline(&mut path_text.clone()),
                     );
 
-                    if ui.button("浏览...").clicked() {
+                    if ui.button("浏览文件夹").clicked() {
                         if let Some(path) = FileDialog::new().pick_folder() {
                             self.source_path = Some(path);
                         }
@@ -62,7 +65,7 @@ impl App for LibreCardApp {
                         egui::TextEdit::singleline(&mut path_text.clone()),
                     );
 
-                    if ui.button("浏览...").clicked() {
+                    if ui.button("浏览文件夹").clicked() {
                         if let Some(path) = FileDialog::new().pick_folder() {
                             self.destination_path = Some(path);
                         }
@@ -70,19 +73,17 @@ impl App for LibreCardApp {
                 });
             });
 
-            if let Some(error) = &self.input_error {
-                ui.label(error);
-            }
-
             let mut start_button = false;
             if let Some(progress) = self.progress.clone() {
                 let progress = progress.lock().unwrap();
                 match &*progress {
                     CopyProgress::Copy { total, copied } => {
                         ui.label(format!("拷贝中... {}/{}", copied, total));
+                        ctx.request_repaint();
                     }
                     CopyProgress::Checksum { total, completed } => {
                         ui.label(format!("校验中... {}/{}", completed, total));
+                        ctx.request_repaint();
                     }
                     CopyProgress::Finished { report } => {
                         ui.label(format!(
@@ -90,6 +91,17 @@ impl App for LibreCardApp {
                             report.total_files(),
                             report.count_errors()
                         ));
+                        if ui.button("导出报告").clicked() {
+                            if let Some(path) =
+                                FileDialog::new().set_file_name("report.csv").save_file()
+                            {
+                                if let Err(e) = report.export_report(path) {
+                                    self.info = Some(e.to_string());
+                                } else {
+                                    self.info = Some("报告已导出".to_string());
+                                }
+                            }
+                        }
                         start_button = true;
                     }
                     CopyProgress::Error { error } => {
@@ -102,7 +114,7 @@ impl App for LibreCardApp {
             }
 
             if start_button {
-                if ui.button("拷贝").clicked() {
+                if ui.button("开始拷贝").clicked() {
                     if let (Some(source), Some(destination)) =
                         (self.source_path.clone(), self.destination_path.clone())
                     {
@@ -113,10 +125,43 @@ impl App for LibreCardApp {
                         self.progress = Some(progress.clone());
                         copy_dir_threaded(&source, &destination, progress).unwrap();
                     } else {
-                        self.input_error = Some("未输入源文件夹和目标文件夹".to_owned());
+                        self.info = Some("未输入源文件夹和目标文件夹".to_owned());
                     }
                 }
             }
+
+            if let Some(info) = &self.info {
+                ui.label(info);
+            }
         });
+    }
+}
+
+impl ChecksumReport {
+    pub fn export_report<P: AsRef<Path>>(&self, to_file: P) -> Result<(), Box<dyn Error>> {
+        let file = File::create(to_file)?;
+        let mut writer = Writer::from_writer(file);
+        writer.write_record(&[
+            "源文件",
+            "源文件哈希",
+            "目标文件",
+            "目标文件哈希",
+            "哈希一致",
+        ])?;
+        for row in &self.0 {
+            writer.write_record(&csv::StringRecord::from(vec![
+                row.source.to_string_lossy(),
+                format!("{:016x}", row.source_hash).into(),
+                row.destination.to_string_lossy(),
+                format!("{:016x}", row.destination_hash).into(),
+                if row.source_hash == row.destination_hash {
+                    "是".into()
+                } else {
+                    "否".into()
+                },
+            ]))?;
+        }
+        writer.flush()?;
+        Ok(())
     }
 }

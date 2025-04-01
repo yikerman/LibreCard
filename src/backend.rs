@@ -99,17 +99,25 @@ fn checksum(todo: &PathPairVec, reporter: &SharedCopyProgress) -> bool {
     }
     let mut report = ChecksumReport(Vec::new());
     for (full_from, full_to) in todo {
-        let source_hash = match xxh3_hash_file(full_from) {
+        let full_from_thread = full_from.clone();
+        let full_to_thread = full_to.clone();
+        let hash_src_thread = thread::spawn(|| xxh3_hash_file(full_from_thread));
+        let hash_dst_thread = thread::spawn(|| xxh3_hash_file(full_to_thread));
+        let source_result = hash_src_thread.join().unwrap();
+        let destination_result = hash_dst_thread.join().unwrap();
+
+        let mut progress = reporter.lock().unwrap();
+        let source_hash = match source_result {
             Ok(hash) => hash,
             Err(e) => {
-                *(reporter.lock().unwrap()) = CopyProgress::Error { error: e };
+                *progress = CopyProgress::Error { error: e };
                 return true;
             }
         };
-        let destination_hash = match xxh3_hash_file(full_to) {
+        let destination_hash = match destination_result {
             Ok(hash) => hash,
             Err(e) => {
-                *(reporter.lock().unwrap()) = CopyProgress::Error { error: e };
+                *progress = CopyProgress::Error { error: e };
                 return true;
             }
         };
@@ -119,7 +127,6 @@ fn checksum(todo: &PathPairVec, reporter: &SharedCopyProgress) -> bool {
             destination: full_to.clone(),
             destination_hash,
         });
-        let mut progress = reporter.lock().unwrap();
         if let CopyProgress::Checksum { total, completed } = *progress {
             *progress = CopyProgress::Checksum {
                 total,
@@ -140,7 +147,7 @@ pub enum CopyProgress {
     Finished { report: ChecksumReport },
 }
 
-pub struct ChecksumReport(Vec<ChecksumReportSingleFile>);
+pub struct ChecksumReport(pub(crate) Vec<ChecksumReportSingleFile>);
 
 pub struct ChecksumReportSingleFile {
     pub source: PathBuf,
