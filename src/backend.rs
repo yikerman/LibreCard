@@ -1,20 +1,18 @@
-﻿use std::fs::File;
+﻿use futures::future::join_all;
 use std::hash::Hasher;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::{io, thread};
+use tokio::fs::File;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::watch;
 use twox_hash::XxHash3_64;
 
-type SharedCopyProgress = Arc<Mutex<CopyProgress>>;
-
-pub fn flatten_filetree(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
+pub fn flatten_filetree_recur(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in dir.read_dir()? {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            files.extend(flatten_filetree(base_dir, &path)?);
+            files.extend(flatten_filetree_recur(base_dir, &path)?);
         } else {
             let relative_path = path.strip_prefix(base_dir).unwrap().to_path_buf();
             files.push(relative_path);
@@ -23,132 +21,154 @@ pub fn flatten_filetree(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<Pat
     Ok(files)
 }
 
-/// Copy a directory and its contents to another location.
-///
-/// The thread is guaranteed to finish when `CopyProgress` is set to `Error` or `Finished`.
-pub fn copy_dir_threaded(
-    from: &PathBuf,
-    to: &PathBuf,
-    reporter: SharedCopyProgress,
-) -> io::Result<()> {
-    let files = flatten_filetree(from, from)?;
-    let from = from.clone();
-    let to = to.clone();
-    let todo: Vec<(PathBuf, PathBuf)> = files
-        .iter()
-        .map(|file| {
-            let from = from.join(file);
-            let to = to.join(file);
-            (from, to)
-        })
-        .collect();
-    let reporter = reporter.clone();
-    thread::spawn(move || {
-        if copy(&todo, &reporter) {
-            return;
-        }
-        if checksum(&todo, &reporter) {
-            return;
-        }
-    });
-    Ok(())
+pub fn flatten_filetree(base_dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
+    flatten_filetree_recur(base_dir, base_dir)
 }
 
-type PathPairVec = Vec<(PathBuf, PathBuf)>;
-fn copy(todo: &PathPairVec, reporter: &SharedCopyProgress) -> bool {
-    {
-        *(reporter.lock().unwrap()) = CopyProgress::Copy {
-            total: todo.len(),
-            copied: 0,
-        };
+pub struct Progress {
+    pub total: usize,
+    pub completed: usize,
+}
+impl Progress {
+    pub fn mut_increment(&mut self) {
+        self.completed += 1;
     }
-    for (full_from, full_to) in todo {
-        if let Some(parent) = full_to.parent() {
-            match std::fs::create_dir_all(parent) {
-                Err(e) => {
-                    *(reporter.lock().unwrap()) = CopyProgress::Error { error: e };
-                    return true;
+
+    pub fn increment(&self) -> Self {
+        Progress {
+            total: self.total,
+            completed: self.completed + 1,
+        }
+    }
+}
+async fn read_file_copy_batch<P: AsRef<Path>>(
+    source_path: P,
+    dest_paths: Vec<PathBuf>,
+) -> io::Result<usize> {
+    // Open the source file
+    let mut source_file = match File::open(&source_path).await {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Failed to open source file: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Open all destination files
+    let mut dest_files = Vec::with_capacity(dest_paths.len());
+    for path in dest_paths {
+        match File::create(&path).await {
+            Ok(file) => dest_files.push(file),
+            Err(e) => {
+                eprintln!("Failed to create destination file {:?}: {}", path, e);
+                return Err(e);
+            }
+        }
+    }
+
+    let mut total_bytes = 0;
+
+    const BUFFER_SIZE: usize = 1024 * 1024; // 1MB
+    let mut buffer1 = vec![0u8; BUFFER_SIZE];
+    let mut buffer2 = vec![0u8; BUFFER_SIZE];
+
+    // Rotated buffers for concurrent read/write
+    let mut read_buffer = &mut buffer2;
+    let mut write_buffer = &mut buffer1;
+
+    // Read first chunk into write_buffer
+    let mut bytes_read = source_file.read(write_buffer).await?;
+    if bytes_read == 0 {
+        return Ok(0); // Source file is empty
+    }
+
+    // Main copy loop
+    loop {
+        std::mem::swap(&mut read_buffer, &mut write_buffer);
+
+        let mut write_futures = Vec::with_capacity(dest_files.len());
+        for file in &mut dest_files {
+            write_futures.push(file.write_all(&write_buffer[..bytes_read]));
+        }
+
+        let read_future = source_file.read(read_buffer);
+
+        let write_results = join_all(write_futures).await;
+
+        // Check for write errors
+        for result in write_results {
+            if let Err(e) = result {
+                eprintln!("Write error: {}", e);
+                return Err(e);
+            }
+        }
+
+        // Get the result of the read operation
+        match read_future.await {
+            Ok(n) => {
+                bytes_read = n; // Might not be BUFFER_SIZE if the next read will hit EOF
+                total_bytes += bytes_read;
+                if bytes_read == 0 {
+                    break; // EOF
                 }
-                Ok(_) => {}
-            }
-        }
-        match std::fs::copy(&full_from, &full_to) {
-            Ok(_size) => {
-                let mut progress = reporter.lock().unwrap();
-                if let CopyProgress::Copy { total, copied } = *progress {
-                    *progress = CopyProgress::Copy {
-                        total,
-                        copied: copied + 1,
-                    };
-                }
             }
             Err(e) => {
-                *(reporter.lock().unwrap()) = CopyProgress::Error { error: e };
-                return true;
+                eprintln!("Read error: {}", e);
+                return Err(e);
             }
         }
     }
-    false
-}
 
-fn checksum(todo: &PathPairVec, reporter: &SharedCopyProgress) -> bool {
-    {
-        *(reporter.lock().unwrap()) = CopyProgress::Checksum {
-            total: todo.len(),
-            completed: 0,
-        };
-    }
-    let mut report = ChecksumReport(Vec::new());
-    for (full_from, full_to) in todo {
-        let full_from_thread = full_from.clone();
-        let full_to_thread = full_to.clone();
-        let hash_src_thread = thread::spawn(|| xxh3_hash_file(full_from_thread));
-        let hash_dst_thread = thread::spawn(|| xxh3_hash_file(full_to_thread));
-        let source_result = hash_src_thread.join().unwrap();
-        let destination_result = hash_dst_thread.join().unwrap();
-
-        let mut progress = reporter.lock().unwrap();
-        let source_hash = match source_result {
-            Ok(hash) => hash,
-            Err(e) => {
-                *progress = CopyProgress::Error { error: e };
-                return true;
-            }
-        };
-        let destination_hash = match destination_result {
-            Ok(hash) => hash,
-            Err(e) => {
-                *progress = CopyProgress::Error { error: e };
-                return true;
-            }
-        };
-        report.0.push(ChecksumReportSingleFile {
-            source: full_from.clone(),
-            source_hash,
-            destination: full_to.clone(),
-            destination_hash,
-        });
-        if let CopyProgress::Checksum { total, completed } = *progress {
-            *progress = CopyProgress::Checksum {
-                total,
-                completed: completed + 1,
-            };
+    // Flush all destination files
+    for file in &mut dest_files {
+        if let Err(e) = file.flush().await {
+            eprintln!("Error flushing file: {}", e);
+            return Err(e);
         }
     }
-    {
-        *(reporter.lock().unwrap()) = CopyProgress::Finished { report };
+
+    Ok(total_bytes)
+}
+
+async fn copy_dirs(
+    source: &PathBuf,
+    dest: &Vec<PathBuf>,
+    rx: watch::Sender<Progress>,
+) -> io::Result<usize> {
+    let files = flatten_filetree(source)?;
+    let total_files = files.len();
+    let progress = Progress {
+        total: total_files,
+        completed: 0,
+    };
+    let mut total_bytes = 0;
+
+    for file in files {
+        let source_path = source.join(&file);
+        let dest_paths: Vec<_> = dest.iter().map(|d| d.join(&file)).collect();
+
+        // Create destination directories if they don't exist
+        for dest_path in &dest_paths {
+            if let Some(parent) = dest_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        match read_file_copy_batch(&source_path, dest_paths).await {
+            Ok(bytes) => total_bytes += bytes,
+            Err(e) => {
+                eprintln!("Error copying file {:?}: {}", source_path, e);
+                return Err(e);
+            }
+        }
+
+        let progress = progress.increment();
+        rx.send(progress).unwrap();
     }
-    false
+    Ok(total_bytes)
 }
 
-pub enum CopyProgress {
-    Copy { total: usize, copied: usize },
-    Checksum { total: usize, completed: usize },
-    Error { error: io::Error },
-    Finished { report: ChecksumReport },
-}
-
-pub struct ChecksumReport(pub(crate) Vec<ChecksumReportSingleFile>);
+pub struct ChecksumReport(pub Vec<ChecksumReportSingleFile>);
 
 pub struct ChecksumReportSingleFile {
     pub source: PathBuf,
@@ -170,22 +190,27 @@ impl ChecksumReport {
     }
 }
 
-pub fn xxh3_hash_file<P: AsRef<Path>>(path: P) -> io::Result<u64> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(1024 * 1024 * 8, file); // 8MB buffer
+pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
+    let file = File::open(path).await?;
+    let mut reader = BufReader::new(file);
 
-    let mut hasher = XxHash3_64::new();
+    // Create the hasher
+    let mut hasher = XxHash3_64::default();
 
-    // Process the file in chunks
-    let mut buffer = [0u8; 1024 * 1024]; // 1MB buffer
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+    let mut buffer = vec![0; CHUNK_SIZE];
+
     loop {
-        let bytes_read = reader.read(&mut buffer)?;
+        let bytes_read = reader.read(&mut buffer).await?;
         if bytes_read == 0 {
+            // EoF reached
             break;
         }
+
+        // Update the hash with this chunk
         hasher.write(&buffer[..bytes_read]);
     }
 
-    let hash = hasher.finish();
-    Ok(hash)
+    // Return the final hash
+    Ok(hasher.finish())
 }
