@@ -8,6 +8,10 @@ use gui::LibreCardApp;
 mod backend;
 mod gui;
 
+#[macro_use]
+extern crate rust_i18n;
+i18n!("locales", fallback = "zh-CN");
+
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder {

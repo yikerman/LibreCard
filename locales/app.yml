@@ -1,0 +1,29 @@
+_version: 2
+src_folder:
+  zh-CN: "源文件夹"
+src_folder.not_selected:
+  zh-CN: "源文件夹未选择"
+browse_folder:
+  zh-CN: "浏览文件夹"
+dest_folder:
+  zh-CN: "目标文件夹"
+dest_folder.not_selected:
+  zh-CN: "目标文件夹未选择"
+folder_not_selected:
+  zh-CN: "文件夹未选择"
+copying:
+  zh-CN: "正在复制 %{copied} / %{total}"
+checksuming:
+  zh-CN: "正在校验 %{copied} / %{total}"
+copying.start:
+  zh-CN: "开始复制"
+copying.finished:
+  zh-CN: "完成复制 %{total} 个文件"
+copying.error:
+  zh-CN: "复制文件失败：%{error}"
+checksuming.finished:
+  zh-CN: "完成校验 %{total} 个文件"
+export_report:
+  zh-CN: "导出报告"
+export_report.finished:
+  zh-CN: "导出报告完成"
