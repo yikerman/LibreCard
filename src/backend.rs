@@ -28,10 +28,12 @@ pub fn flatten_filetree(base_dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
     flatten_filetree_recur(base_dir, base_dir)
 }
 
+#[derive(Clone, Debug)]
 pub struct Progress {
     pub total: usize,
     pub completed: usize,
 }
+
 impl Progress {
     pub fn mut_increment(&mut self) {
         self.completed += 1;
@@ -44,6 +46,16 @@ impl Progress {
         }
     }
 }
+
+impl Default for Progress {
+    fn default() -> Self {
+        Progress {
+            total: 0,
+            completed: 0,
+        }
+    }
+}
+
 pub async fn read_file_copy_batch<P: AsRef<Path>>(
     source_path: P,
     dest_paths: Vec<PathBuf>,
@@ -142,7 +154,7 @@ pub async fn copy_dirs(
 ) -> SizeResult {
     let files = flatten_filetree(source)?;
     let total_files = files.len();
-    let progress = Progress {
+    let mut progress = Progress {
         total: total_files,
         completed: 0,
     };
@@ -167,8 +179,8 @@ pub async fn copy_dirs(
             }
         }
 
-        let progress = progress.increment();
-        rx.send(progress).unwrap();
+        progress.mut_increment();
+        rx.send(progress.clone()).unwrap();
     }
     Ok(total_bytes)
 }
@@ -253,7 +265,7 @@ pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
             break;
         }
 
-        // Since memory read is far faster than disk IO, and xxHash3 has roughly the same throughput as memory read, 
+        // Since memory read is far faster than disk IO, and xxHash3 has roughly the same throughput as memory read,
         // we can assume it is not a long enough task to spawn_blocking
         hasher.write(&buffer[..bytes_read]);
     }
