@@ -17,23 +17,29 @@ folder_not_selected:
   zh-CN: "文件夹未选择"
 copying:
   zh-CN: "正在复制 %{copied} / %{total}"
-checksuming:
-  zh-CN: "正在校验 %{copied} / %{total}"
+checksum:
+  zh-CN: "正在校验 %{completed} / %{total}"
 copying.start:
   zh-CN: "开始复制"
 copying.finished:
   zh-CN: "完成复制 %{size}"
 copying.error:
   zh-CN: "复制文件失败：%{error}"
-checksuming.finished:
-  zh-CN: "完成校验 %{total} 个文件"
-export_report:
+checksum.start:
+  zh-CN: "开始校验"
+checksum.error:
+  zh-CN: "校验文件失败：%{error}"
+checksum.finished:
+  zh-CN: "完成校验 %{total} 个文件，失败 %{failed} 个"
+checksum.export:
   zh-CN: "导出报告"
-export_report.finished:
+checksum.export.finished:
   zh-CN: "导出报告完成"
-title.input:
+input.title:
   zh-CN: "输入信息"
-title.copying:
+copying.title:
   zh-CN: "复制中"
-title.checksuming:
+checksum.title:
   zh-CN: "校验中"
+error:
+  zh-CN: "错误：%{error}"

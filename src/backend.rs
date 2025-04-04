@@ -83,22 +83,23 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
 
     let mut total_bytes = 0;
 
+
+    // Rotated buffers for concurrent read/write
     const BUFFER_SIZE: usize = 1024 * 1024; // 1MB
     let mut buffer1 = vec![0u8; BUFFER_SIZE];
     let mut buffer2 = vec![0u8; BUFFER_SIZE];
-
-    // Rotated buffers for concurrent read/write
-    let mut read_buffer = &mut buffer2;
-    let mut write_buffer = &mut buffer1;
+    let mut read_buffer = &mut buffer1;
+    let mut write_buffer = &mut buffer2;
 
     // Read first chunk into write_buffer
-    let mut bytes_read = source_file.read(write_buffer).await?;
+    let mut bytes_read = source_file.read(read_buffer).await?;
     if bytes_read == 0 {
-        return Ok(0); // Source file is empty
+        return Ok(0); // Edge case: empty file
     }
 
-    // Main copy loop
     loop {
+        // Data from read_buffer from the last loop goes to write_buffer, and write_buffer from the last loop
+        // is overwritten
         std::mem::swap(&mut read_buffer, &mut write_buffer);
 
         let mut write_futures = Vec::with_capacity(dest_files.len());
@@ -123,11 +124,11 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
         // Get the result of the read operation
         match read_result {
             Ok(n) => {
-                bytes_read = n; // Might not be BUFFER_SIZE if the next read will hit EOF
-                total_bytes += bytes_read as u64;
+                bytes_read = n; // Might not be BUFFER_SIZE if the upcoming read will hit EOF
                 if bytes_read == 0 {
                     break; // EOF
                 }
+                total_bytes += bytes_read as u64;
             }
             Err(e) => {
                 eprintln!("Read error: {}", e);
@@ -150,7 +151,7 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
 pub async fn copy_dirs(
     source: &PathBuf,
     dest: &Vec<PathBuf>,
-    rx: watch::Sender<Progress>,
+    tx: watch::Sender<Progress>,
 ) -> SizeResult {
     let files = flatten_filetree(source)?;
     let total_files = files.len();
@@ -180,7 +181,7 @@ pub async fn copy_dirs(
         }
 
         progress.mut_increment();
-        rx.send(progress.clone()).unwrap();
+        tx.send(progress.clone()).unwrap();
     }
     Ok(total_bytes)
 }
@@ -188,8 +189,15 @@ pub async fn copy_dirs(
 pub struct ChecksumReport(pub Vec<ChecksumReportSingleFile>);
 
 pub struct ChecksumReportSingleFile {
-    pub source_hash: (PathBuf, u64),
-    pub destination_hash: Vec<(PathBuf, u64)>,
+    pub source: (PathBuf, u64),
+    pub destinations: Vec<(PathBuf, u64)>,
+}
+
+impl ChecksumReportSingleFile {
+    pub fn consistent(&self) -> bool {
+        let source_hash = self.source.1;
+        self.destinations.iter().all(|(_, d)| *d == source_hash)
+    }
 }
 
 impl ChecksumReport {
@@ -198,26 +206,21 @@ impl ChecksumReport {
     }
 
     pub fn count_errors(&self) -> usize {
-        self.0
-            .iter()
-            .filter(|report| {
-                let source_hash = report.source_hash.1;
-                report
-                    .destination_hash
-                    .iter()
-                    .any(|(_, dest_hash)| source_hash != *dest_hash)
-            })
-            .count()
+        self.0.iter().filter(|file| !file.consistent()).count()
     }
 }
 
-pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>) -> io::Result<ChecksumReport> {
-    let files = flatten_filetree(source)?;
+pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>, files: &Vec<PathBuf>, tx: watch::Sender<Progress>) -> io::Result<ChecksumReport> {
     let mut report = Vec::new();
+    let mut progress = Progress {
+        total: files.len(),
+        completed: 0,
+    };
+    tx.send(progress.clone()).unwrap();
 
     for file in files {
-        let source_path = source.join(&file);
-        let dest_paths: Vec<_> = dest.iter().map(|d| d.join(&file)).collect();
+        let source_path = source.join(file);
+        let dest_paths: Vec<_> = dest.iter().map(|d| d.join(file)).collect();
 
         let source_hash_future = compute_file_hash(&source_path);
         let dest_hash_futures: Vec<_> = dest_paths
@@ -241,9 +244,12 @@ pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>) -> io::Result<Chec
         }
 
         report.push(ChecksumReportSingleFile {
-            source_hash: (source_path, source_hash_result?),
-            destination_hash: destination_hashes,
+            source: (source_path, source_hash_result?),
+            destinations: destination_hashes,
         });
+
+        progress.mut_increment();
+        tx.send(progress.clone()).unwrap();
     }
     Ok(ChecksumReport(report))
 }
@@ -261,7 +267,7 @@ pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
     loop {
         let bytes_read = reader.read(&mut buffer).await?;
         if bytes_read == 0 {
-            // EoF reached
+            // EOF reached
             break;
         }
 
