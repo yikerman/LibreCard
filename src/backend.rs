@@ -3,6 +3,7 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::join;
 use tokio::sync::watch;
 use twox_hash::XxHash3_64;
 
@@ -92,10 +93,12 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
         for file in &mut dest_files {
             write_futures.push(file.write_all(&write_buffer[..bytes_read]));
         }
+        let write_futures = join_all(write_futures);
 
         let read_future = source_file.read(read_buffer);
 
-        let write_results = join_all(write_futures).await;
+        // Execute read and write futures concurrently
+        let (read_result, write_results) = join!(read_future, write_futures);
 
         // Check for write errors
         for result in write_results {
@@ -106,7 +109,7 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
         }
 
         // Get the result of the read operation
-        match read_future.await {
+        match read_result {
             Ok(n) => {
                 bytes_read = n; // Might not be BUFFER_SIZE if the next read will hit EOF
                 total_bytes += bytes_read as u64;
@@ -204,18 +207,19 @@ pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>) -> io::Result<Chec
         let source_path = source.join(&file);
         let dest_paths: Vec<_> = dest.iter().map(|d| d.join(&file)).collect();
 
-        // Concurrently compute the hash of the source file and all destination files
         let source_hash_future = compute_file_hash(&source_path);
         let dest_hash_futures: Vec<_> = dest_paths
             .iter()
             .map(|dest_path| compute_file_hash(dest_path))
             .collect();
+        let dest_hash_futures = join_all(dest_hash_futures);
 
-        let source_hash = source_hash_future.await?;
-        let dest_hashes = join_all(dest_hash_futures).await;
+        // Execute the futures concurrently
+        let (source_hash_result, dest_hash_results) = join!(source_hash_future, dest_hash_futures);
+
         let mut destination_hashes = Vec::new();
-        for (dest_path, dest_hash) in dest_paths.iter().zip(dest_hashes) {
-            match dest_hash {
+        for (dest_path, dest_hash_result) in dest_paths.iter().zip(dest_hash_results) {
+            match dest_hash_result {
                 Ok(hash) => destination_hashes.push((dest_path.clone(), hash)),
                 Err(e) => {
                     eprintln!("Error computing hash for {:?}: {}", dest_path, e);
@@ -225,7 +229,7 @@ pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>) -> io::Result<Chec
         }
 
         report.push(ChecksumReportSingleFile {
-            source_hash: (source_path, source_hash),
+            source_hash: (source_path, source_hash_result?),
             destination_hash: destination_hashes,
         });
     }
@@ -249,7 +253,8 @@ pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
             break;
         }
 
-        // Update the hash with this chunk
+        // Since memory read is far faster than disk IO, and xxHash3 has roughly the same throughput as memory read, 
+        // we can assume it is not a long enough task to spawn_blocking
         hasher.write(&buffer[..bytes_read]);
     }
 
