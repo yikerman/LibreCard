@@ -6,6 +6,8 @@ use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 use twox_hash::XxHash3_64;
 
+pub type SizeResult = io::Result<u64>;
+
 pub fn flatten_filetree_recur(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -41,10 +43,10 @@ impl Progress {
         }
     }
 }
-async fn read_file_copy_batch<P: AsRef<Path>>(
+pub async fn read_file_copy_batch<P: AsRef<Path>>(
     source_path: P,
     dest_paths: Vec<PathBuf>,
-) -> io::Result<usize> {
+) -> SizeResult {
     // Open the source file
     let mut source_file = match File::open(&source_path).await {
         Ok(file) => file,
@@ -107,7 +109,7 @@ async fn read_file_copy_batch<P: AsRef<Path>>(
         match read_future.await {
             Ok(n) => {
                 bytes_read = n; // Might not be BUFFER_SIZE if the next read will hit EOF
-                total_bytes += bytes_read;
+                total_bytes += bytes_read as u64;
                 if bytes_read == 0 {
                     break; // EOF
                 }
@@ -130,11 +132,11 @@ async fn read_file_copy_batch<P: AsRef<Path>>(
     Ok(total_bytes)
 }
 
-async fn copy_dirs(
+pub async fn copy_dirs(
     source: &PathBuf,
     dest: &Vec<PathBuf>,
     rx: watch::Sender<Progress>,
-) -> io::Result<usize> {
+) -> SizeResult {
     let files = flatten_filetree(source)?;
     let total_files = files.len();
     let progress = Progress {
@@ -171,10 +173,8 @@ async fn copy_dirs(
 pub struct ChecksumReport(pub Vec<ChecksumReportSingleFile>);
 
 pub struct ChecksumReportSingleFile {
-    pub source: PathBuf,
-    pub source_hash: u64,
-    pub destination: PathBuf,
-    pub destination_hash: u64,
+    pub source_hash: (PathBuf, u64),
+    pub destination_hash: Vec<(PathBuf, u64)>,
 }
 
 impl ChecksumReport {
@@ -185,9 +185,51 @@ impl ChecksumReport {
     pub fn count_errors(&self) -> usize {
         self.0
             .iter()
-            .filter(|file| file.source_hash != file.destination_hash)
+            .filter(|report| {
+                let source_hash = report.source_hash.1;
+                report
+                    .destination_hash
+                    .iter()
+                    .any(|(_, dest_hash)| source_hash != *dest_hash)
+            })
             .count()
     }
+}
+
+pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>) -> io::Result<ChecksumReport> {
+    let files = flatten_filetree(source)?;
+    let mut report = Vec::new();
+
+    for file in files {
+        let source_path = source.join(&file);
+        let dest_paths: Vec<_> = dest.iter().map(|d| d.join(&file)).collect();
+
+        // Concurrently compute the hash of the source file and all destination files
+        let source_hash_future = compute_file_hash(&source_path);
+        let dest_hash_futures: Vec<_> = dest_paths
+            .iter()
+            .map(|dest_path| compute_file_hash(dest_path))
+            .collect();
+
+        let source_hash = source_hash_future.await?;
+        let dest_hashes = join_all(dest_hash_futures).await;
+        let mut destination_hashes = Vec::new();
+        for (dest_path, dest_hash) in dest_paths.iter().zip(dest_hashes) {
+            match dest_hash {
+                Ok(hash) => destination_hashes.push((dest_path.clone(), hash)),
+                Err(e) => {
+                    eprintln!("Error computing hash for {:?}: {}", dest_path, e);
+                    return Err(e);
+                }
+            }
+        }
+
+        report.push(ChecksumReportSingleFile {
+            source_hash: (source_path, source_hash),
+            destination_hash: destination_hashes,
+        });
+    }
+    Ok(ChecksumReport(report))
 }
 
 pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
