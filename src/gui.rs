@@ -1,7 +1,7 @@
-﻿use crate::backend::{copy_dirs, flatten_dir_files, hash_dirs, ChecksumReport, Progress};
+﻿use crate::backend::{ChecksumReport, Progress, copy_dirs, flatten_dir_files, hash_dirs};
 use human_bytes::human_bytes;
 use iced::widget::{button, column, container, progress_bar, row, text, text_input};
-use iced::{time, Color, Element, Length, Subscription, Task};
+use iced::{Color, Element, Length, Subscription, Task, time};
 use rfd::FileDialog;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,7 +15,10 @@ enum LibreCardAppStage {
     Copying {
         progress: Progress,
         rx: watch::Receiver<Progress>,
-        completed: bool,
+    },
+
+    CopyComplete {
+        total_bytes_copied: u64,
     },
 
     Checksumming {
@@ -66,15 +69,9 @@ impl LibreCardApp {
             LibreCardMessage::Tick => {
                 // Poll progress channel on timer tick
                 match &mut self.stage {
-                    LibreCardAppStage::Copying {
-                        progress,
-                        rx,
-                        completed,
-                    } => {
-                        if !*completed {
-                            if let Ok(true) = rx.has_changed() {
-                                *progress = *rx.borrow();
-                            }
+                    LibreCardAppStage::Copying { progress, rx } => {
+                        if let Ok(true) = rx.has_changed() {
+                            *progress = *rx.borrow();
                         }
                     }
                     LibreCardAppStage::Checksumming { progress, rx } => {
@@ -83,6 +80,22 @@ impl LibreCardApp {
                         }
                     }
                     _ => {}
+                }
+                Task::none()
+            }
+
+            LibreCardMessage::CopyCompleted(result) => {
+                match result {
+                    Ok(bytes) => {
+                        self.stage = LibreCardAppStage::CopyComplete {
+                            total_bytes_copied: bytes,
+                        };
+                        self.total_bytes_copied = Some(bytes);
+                    }
+                    Err(error) => {
+                        self.stage = LibreCardAppStage::Input;
+                        self.error_message = Some(error);
+                    }
                 }
                 Task::none()
             }
@@ -140,7 +153,6 @@ impl LibreCardApp {
                 self.stage = LibreCardAppStage::Copying {
                     progress: Progress::default(),
                     rx,
-                    completed: false,
                 };
 
                 // Task to perform the copy operation
@@ -155,35 +167,7 @@ impl LibreCardApp {
                 )
             }
 
-            LibreCardMessage::CopyCompleted(result) => {
-                match result {
-                    Ok(bytes) => {
-                        self.total_bytes_copied = Some(bytes);
-                        if let LibreCardAppStage::Copying { completed, .. } = &mut self.stage {
-                            *completed = true;
-                        }
-                    }
-                    Err(error) => {
-                        self.stage = LibreCardAppStage::Input;
-                        self.error_message = Some(error);
-                    }
-                }
-                Task::none()
-            }
-
             LibreCardMessage::StartChecksum => {
-                let in_copy_stage = matches!(
-                    self.stage,
-                    LibreCardAppStage::Copying {
-                        completed: true,
-                        ..
-                    }
-                );
-
-                if !in_copy_stage {
-                    return Task::none();
-                }
-
                 let source = self.source_directory.clone().unwrap();
                 let destinations: Vec<PathBuf> = self
                     .destination_directories
@@ -279,11 +263,10 @@ impl LibreCardApp {
     pub fn view(&self) -> Element<LibreCardMessage> {
         let content = match &self.stage {
             LibreCardAppStage::Input => self.view_input_stage(),
-            LibreCardAppStage::Copying {
-                progress,
-                completed,
-                ..
-            } => self.view_copy_stage(progress, *completed),
+            LibreCardAppStage::Copying { progress, .. } => self.view_copy_stage(progress),
+            LibreCardAppStage::CopyComplete { total_bytes_copied } => {
+                self.view_copy_complete_stage(*total_bytes_copied)
+            }
             LibreCardAppStage::Checksumming { progress, .. } => self.view_checksum_stage(progress),
             LibreCardAppStage::ChecksumComplete { report } => {
                 self.view_checksum_complete_stage(report)
@@ -318,10 +301,7 @@ impl LibreCardApp {
 
     pub fn subscription(&self) -> Subscription<LibreCardMessage> {
         match &self.stage {
-            LibreCardAppStage::Copying {
-                completed: false, ..
-            }
-            | LibreCardAppStage::Checksumming { .. } => {
+            LibreCardAppStage::Copying { .. } | LibreCardAppStage::Checksumming { .. } => {
                 time::every(Duration::from_millis(200)).map(|_| LibreCardMessage::Tick)
             }
             _ => Subscription::none(),
@@ -425,7 +405,7 @@ impl LibreCardApp {
         container(content).into()
     }
 
-    fn view_copy_stage(&self, progress: &Progress, completed: bool) -> Element<LibreCardMessage> {
+    fn view_copy_stage(&self, progress: &Progress) -> Element<LibreCardMessage> {
         let title = text("Copying Files")
             .size(28)
             .width(Length::Fill)
@@ -448,35 +428,36 @@ impl LibreCardApp {
         .width(Length::Fill)
         .align_x(iced::alignment::Horizontal::Center);
 
-        let bytes_text = if let Some(bytes) = self.total_bytes_copied {
-            text(format!("Total Bytes Copied: {}", human_bytes(bytes as f64)))
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-        } else {
-            text("")
-        };
+        column![title, progress_bar, progress_text,]
+            .spacing(20)
+            .padding(20)
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn view_copy_complete_stage(&self, total_bytes_copied: u64) -> Element<LibreCardMessage> {
+        let title = text("Copy Complete")
+            .size(28)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center);
+
+        let bytes_text = text(format!(
+            "Total Bytes Copied: {}",
+            human_bytes(total_bytes_copied as f64)
+        ))
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center);
 
         let checksum_button = button(text("Verify Checksum").size(20))
             .width(Length::Fill)
-            .padding(15);
+            .padding(15)
+            .on_press(LibreCardMessage::StartChecksum);
 
-        let checksum_button = if completed {
-            checksum_button.on_press(LibreCardMessage::StartChecksum)
-        } else {
-            checksum_button
-        };
-
-        column![
-            title,
-            progress_bar,
-            progress_text,
-            bytes_text,
-            checksum_button,
-        ]
-        .spacing(20)
-        .padding(20)
-        .width(Length::Fill)
-        .into()
+        column![title, bytes_text, checksum_button,]
+            .spacing(20)
+            .padding(20)
+            .width(Length::Fill)
+            .into()
     }
 
     fn view_checksum_stage(&self, progress: &Progress) -> Element<LibreCardMessage> {
