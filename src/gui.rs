@@ -21,7 +21,6 @@ enum LibreCardAppStage {
     Checksumming {
         progress: Progress,
         rx: watch::Receiver<Progress>,
-        completed: bool,
     },
 
     ChecksumComplete {
@@ -78,15 +77,9 @@ impl LibreCardApp {
                             }
                         }
                     }
-                    LibreCardAppStage::Checksumming {
-                        progress,
-                        rx,
-                        completed,
-                    } => {
-                        if !*completed {
-                            if let Ok(true) = rx.has_changed() {
-                                *progress = *rx.borrow();
-                            }
+                    LibreCardAppStage::Checksumming { progress, rx } => {
+                        if let Ok(true) = rx.has_changed() {
+                            *progress = *rx.borrow();
                         }
                     }
                     _ => {}
@@ -166,7 +159,7 @@ impl LibreCardApp {
                 match result {
                     Ok(bytes) => {
                         self.total_bytes_copied = Some(bytes);
-                        if let LibreCardAppStage::Copying {completed, ..} = &mut self.stage {
+                        if let LibreCardAppStage::Copying { completed, .. } = &mut self.stage {
                             *completed = true;
                         }
                     }
@@ -206,7 +199,6 @@ impl LibreCardApp {
                         self.stage = LibreCardAppStage::Checksumming {
                             progress: Progress::default(),
                             rx,
-                            completed: false,
                         };
 
                         // Task to perform the checksum operation
@@ -214,7 +206,9 @@ impl LibreCardApp {
                             async move {
                                 match hash_dirs(&source, &destinations, &files, tx).await {
                                     Ok(report) => LibreCardMessage::ChecksumCompleted(Ok(report)),
-                                    Err(e) => LibreCardMessage::ChecksumCompleted(Err(e.to_string())),
+                                    Err(e) => {
+                                        LibreCardMessage::ChecksumCompleted(Err(e.to_string()))
+                                    }
                                 }
                             },
                             |msg| msg,
@@ -253,7 +247,9 @@ impl LibreCardApp {
                             {
                                 match report_clone.export_report(path) {
                                     Ok(()) => LibreCardMessage::ExportCompleted(Ok(())),
-                                    Err(err) => LibreCardMessage::ExportCompleted(Err(err.to_string())),
+                                    Err(err) => {
+                                        LibreCardMessage::ExportCompleted(Err(err.to_string()))
+                                    }
                                 }
                             } else {
                                 LibreCardMessage::ExportCompleted(Ok(()))
@@ -288,12 +284,10 @@ impl LibreCardApp {
                 completed,
                 ..
             } => self.view_copy_stage(progress, *completed),
-            LibreCardAppStage::Checksumming {
-                progress,
-                completed,
-                ..
-            } => self.view_checksum_stage(progress, *completed),
-            LibreCardAppStage::ChecksumComplete { report } => self.view_checksum_complete_stage(report),
+            LibreCardAppStage::Checksumming { progress, .. } => self.view_checksum_stage(progress),
+            LibreCardAppStage::ChecksumComplete { report } => {
+                self.view_checksum_complete_stage(report)
+            }
         };
 
         let content: Element<LibreCardMessage> = if let Some(error) = &self.error_message {
@@ -324,12 +318,11 @@ impl LibreCardApp {
 
     pub fn subscription(&self) -> Subscription<LibreCardMessage> {
         match &self.stage {
-            LibreCardAppStage::Copying { completed, .. } | LibreCardAppStage::Checksumming { completed, .. } => {
-                if !completed {
-                    time::every(Duration::from_millis(200)).map(|_| LibreCardMessage::Tick)
-                } else {
-                    Subscription::none()
-                }
+            LibreCardAppStage::Copying {
+                completed: false, ..
+            }
+            | LibreCardAppStage::Checksumming { .. } => {
+                time::every(Duration::from_millis(200)).map(|_| LibreCardMessage::Tick)
             }
             _ => Subscription::none(),
         }
@@ -486,7 +479,7 @@ impl LibreCardApp {
         .into()
     }
 
-    fn view_checksum_stage(&self, progress: &Progress, completed: bool) -> Element<LibreCardMessage> {
+    fn view_checksum_stage(&self, progress: &Progress) -> Element<LibreCardMessage> {
         let title = text("Verifying File Integrity")
             .size(28)
             .width(Length::Fill)
