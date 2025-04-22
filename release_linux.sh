@@ -19,7 +19,7 @@ cp "LICENSE" "$PACKAGE_DIR/LICENSE"
 cp "README.md" "$PACKAGE_DIR/README.md"
 
 TAR_PATH="target/$PACKAGE_NAME.tar.gz"
-tar -czf "$TAR_PATH" -C "target" "$PACKAGE_NAME"
+tar --owner=0 --group=0 -czf "$TAR_PATH" -C "target" "$PACKAGE_NAME"
 
 echo "Packed successfully at $TAR_PATH"
 
