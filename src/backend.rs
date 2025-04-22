@@ -13,13 +13,13 @@ fn collect_results<T, E>(vec: Vec<Result<T, E>>) -> Result<Vec<T>, E> {
     vec.into_iter().collect()
 }
 
-pub fn flatten_filetree_recur(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
+pub fn flatten_dir_files_recur(base_dir: &Path, dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            files.extend(flatten_filetree_recur(base_dir, &path)?);
+            files.extend(flatten_dir_files_recur(base_dir, &path)?);
         } else {
             let relative_path = path.strip_prefix(base_dir).unwrap().to_path_buf();
             files.push(relative_path);
@@ -28,11 +28,11 @@ pub fn flatten_filetree_recur(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<V
     Ok(files)
 }
 
-pub fn flatten_filetree(base_dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
-    flatten_filetree_recur(base_dir, base_dir)
+pub fn flatten_dir_files(base_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    flatten_dir_files_recur(base_dir, base_dir)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Progress {
     pub total: usize,
     pub completed: usize,
@@ -41,13 +41,6 @@ pub struct Progress {
 impl Progress {
     pub fn mut_increment(&mut self) {
         self.completed += 1;
-    }
-
-    pub fn increment(&self) -> Self {
-        Progress {
-            total: self.total,
-            completed: self.completed + 1,
-        }
     }
 }
 
@@ -65,24 +58,12 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
     dest_paths: Vec<PathBuf>,
 ) -> SizeResult {
     // Open the source file
-    let mut source_file = match File::open(&source_path).await {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Failed to open source file: {}", e);
-            return Err(e);
-        }
-    };
+    let mut source_file = File::open(&source_path).await?;
 
     // Open all destination files
     let mut dest_files = Vec::with_capacity(dest_paths.len());
     for path in dest_paths {
-        match File::create(&path).await {
-            Ok(file) => dest_files.push(file),
-            Err(e) => {
-                eprintln!("Failed to create destination file {:?}: {}", path, e);
-                return Err(e);
-            }
-        }
+        dest_files.push(File::create(&path).await?);
     }
 
     let mut total_bytes = 0;
@@ -118,34 +99,19 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
 
         // Check for write errors
         for result in write_results {
-            if let Err(e) = result {
-                eprintln!("Write error: {}", e);
-                return Err(e);
-            }
+            result?;
         }
 
-        // Get the result of the read operation
-        match read_result {
-            Ok(n) => {
-                bytes_read = n; // Might not be BUFFER_SIZE if the upcoming read will hit EOF
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-                total_bytes += bytes_read as u64;
-            }
-            Err(e) => {
-                eprintln!("Read error: {}", e);
-                return Err(e);
-            }
+        bytes_read = read_result?; // Might not be BUFFER_SIZE if the upcoming read will hit EOF
+        if bytes_read == 0 {
+            break; // EOF
         }
+        total_bytes += bytes_read as u64;
     }
 
     // Flush all destination files
     for file in &mut dest_files {
-        if let Err(e) = file.flush().await {
-            eprintln!("Error flushing file: {}", e);
-            return Err(e);
-        }
+        file.flush().await?;
     }
 
     Ok(total_bytes)
@@ -156,7 +122,7 @@ pub async fn copy_dirs(
     dest: &Vec<PathBuf>,
     tx: watch::Sender<Progress>,
 ) -> SizeResult {
-    let files = flatten_filetree(source)?;
+    let files = flatten_dir_files(source)?;
     let total_files = files.len();
     let mut progress = Progress {
         total: total_files,
@@ -175,16 +141,10 @@ pub async fn copy_dirs(
             }
         }
 
-        match read_file_copy_batch(&source_path, dest_paths).await {
-            Ok(bytes) => total_bytes += bytes,
-            Err(e) => {
-                eprintln!("Error copying file {:?}: {}", source_path, e);
-                return Err(e);
-            }
-        }
+        total_bytes += read_file_copy_batch(&source_path, dest_paths).await?;
 
         progress.mut_increment();
-        tx.send(progress.clone()).unwrap();
+        tx.send(progress).unwrap();
     }
     Ok(total_bytes)
 }
@@ -224,7 +184,7 @@ pub async fn hash_dirs(
         total: files.len(),
         completed: 0,
     };
-    tx.send(progress.clone()).unwrap();
+    tx.send(progress).unwrap();
 
     for file in files {
         let source_path = source.join(file);
@@ -248,13 +208,7 @@ pub async fn hash_dirs(
 
         let mut destination_hashes = Vec::new();
         for (dest_path, dest_hash_result) in dest_paths.iter().zip(dest_hash_results) {
-            match dest_hash_result {
-                Ok(hash) => destination_hashes.push((dest_path.clone(), hash)),
-                Err(e) => {
-                    eprintln!("Error computing hash for {:?}: {}", dest_path, e);
-                    return Err(e);
-                }
-            }
+            destination_hashes.push((dest_path.clone(), dest_hash_result?));
         }
 
         report.push(ChecksumReportSingleFile {
@@ -263,7 +217,7 @@ pub async fn hash_dirs(
         });
 
         progress.mut_increment();
-        tx.send(progress.clone()).unwrap();
+        tx.send(progress).unwrap();
     }
     Ok(ChecksumReport(report))
 }

@@ -1,5 +1,5 @@
 ﻿use crate::backend::{
-    ChecksumReport, Progress, SizeResult, copy_dirs, flatten_filetree, hash_dirs,
+    ChecksumReport, Progress, SizeResult, copy_dirs, flatten_dir_files, hash_dirs,
 };
 use csv::Writer;
 use eframe::egui::{Context, Ui};
@@ -174,7 +174,7 @@ impl LibreCardApp {
             let destination_paths_checked = destination_paths_checked;
 
             // FIXME: Repeated globbing
-            let globbed_files_result = flatten_filetree(&source_path);
+            let globbed_files_result = flatten_dir_files(&source_path);
             let globbed_files = match globbed_files_result {
                 Ok(files) => files,
                 Err(e) => {
