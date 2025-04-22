@@ -16,6 +16,9 @@ iced = { version = "0.13.1", features = ["tokio"] }
 rfd = "0.15.3"
 human_bytes = "0.4.3"
 
+[profile.dev]
+opt-level = 1
+
 [profile.release]
 lto = "fat"
 strip = "symbols"

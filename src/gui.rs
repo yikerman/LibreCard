@@ -75,10 +75,6 @@ impl LibreCardApp {
                         if !*completed {
                             if let Ok(true) = rx.has_changed() {
                                 *progress = *rx.borrow();
-
-                                if progress.completed >= progress.total && progress.total > 0 {
-                                    *completed = true;
-                                }
                             }
                         }
                     }
@@ -90,10 +86,6 @@ impl LibreCardApp {
                         if !*completed {
                             if let Ok(true) = rx.has_changed() {
                                 *progress = *rx.borrow();
-
-                                if progress.completed >= progress.total && progress.total > 0 {
-                                    *completed = true;
-                                }
                             }
                         }
                     }
@@ -174,7 +166,9 @@ impl LibreCardApp {
                 match result {
                     Ok(bytes) => {
                         self.total_bytes_copied = Some(bytes);
-                        // We're already marking completed in the Tick handler
+                        if let LibreCardAppStage::Copying {completed, ..} = &mut self.stage {
+                            *completed = true;
+                        }
                     }
                     Err(error) => {
                         self.stage = LibreCardAppStage::Input;
@@ -344,7 +338,7 @@ impl LibreCardApp {
 
 impl LibreCardApp {
     fn view_input_stage(&self) -> Element<LibreCardMessage> {
-        let title = text("File Copy & Checksum Tool")
+        let title = text("Choose Source & Destination")
             .size(28)
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Center);
