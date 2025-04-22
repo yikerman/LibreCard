@@ -64,7 +64,7 @@ echo "App bundle created at $APP_BUNDLE"
 
 # Create DMG with README and LICENSE
 echo "Creating DMG..."
-DMG_NAME="${APP_NAME}-`git rev-parse --short HEAD`.dmg"
+DMG_NAME="${APP_NAME}-macos_universal-$(git rev-parse --short HEAD).dmg"
 DMG_PATH="target/$DMG_NAME"
 TMP_DMG_PATH="target/${APP_NAME}_tmp.dmg"
 DMG_STAGING="target/dmg_staging"
