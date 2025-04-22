@@ -3,11 +3,15 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::join;
 use tokio::sync::watch;
+use tokio::{join, spawn};
 use twox_hash::XxHash3_64;
 
 pub type SizeResult = io::Result<u64>;
+
+fn collect_results<T, E>(vec: Vec<Result<T, E>>) -> Result<Vec<T>, E> {
+    vec.into_iter().collect()
+}
 
 pub fn flatten_filetree_recur(base_dir: &PathBuf, dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -82,7 +86,6 @@ pub async fn read_file_copy_batch<P: AsRef<Path>>(
     }
 
     let mut total_bytes = 0;
-
 
     // Rotated buffers for concurrent read/write
     const BUFFER_SIZE: usize = 1024 * 1024; // 1MB
@@ -210,7 +213,12 @@ impl ChecksumReport {
     }
 }
 
-pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>, files: &Vec<PathBuf>, tx: watch::Sender<Progress>) -> io::Result<ChecksumReport> {
+pub async fn hash_dirs(
+    source: &PathBuf,
+    dest: &Vec<PathBuf>,
+    files: &Vec<PathBuf>,
+    tx: watch::Sender<Progress>,
+) -> io::Result<ChecksumReport> {
     let mut report = Vec::new();
     let mut progress = Progress {
         total: files.len(),
@@ -221,16 +229,22 @@ pub async fn hash_dirs(source: &PathBuf, dest: &Vec<PathBuf>, files: &Vec<PathBu
     for file in files {
         let source_path = source.join(file);
         let dest_paths: Vec<_> = dest.iter().map(|d| d.join(file)).collect();
+        let source_path_clone = source_path.clone();
+        let dest_paths_clone = dest_paths.clone();
 
-        let source_hash_future = compute_file_hash(&source_path);
-        let dest_hash_futures: Vec<_> = dest_paths
-            .iter()
-            .map(|dest_path| compute_file_hash(dest_path))
+        // Take advantage of multiple cores, just in case.
+        let source_hash_future = spawn(async move { compute_file_hash(&source_path_clone).await });
+        let dest_hash_futures: Vec<_> = dest_paths_clone
+            .into_iter()
+            .map(|dest_path| spawn(async move { compute_file_hash(dest_path).await }))
             .collect();
         let dest_hash_futures = join_all(dest_hash_futures);
 
         // Execute the futures concurrently
         let (source_hash_result, dest_hash_results) = join!(source_hash_future, dest_hash_futures);
+        // Remove JoinError
+        let source_hash_result = source_hash_result?;
+        let dest_hash_results = collect_results(dest_hash_results)?;
 
         let mut destination_hashes = Vec::new();
         for (dest_path, dest_hash_result) in dest_paths.iter().zip(dest_hash_results) {
