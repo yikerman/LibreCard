@@ -1,4 +1,6 @@
-﻿use futures::future::join_all;
+﻿use csv::Writer;
+use futures::future::join_all;
+use std::error::Error;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -149,8 +151,10 @@ pub async fn copy_dirs(
     Ok(total_bytes)
 }
 
+#[derive(Clone, Debug)]
 pub struct ChecksumReport(pub Vec<ChecksumReportSingleFile>);
 
+#[derive(Clone, Debug)]
 pub struct ChecksumReportSingleFile {
     pub source: (PathBuf, u64),
     pub destinations: Vec<(PathBuf, u64)>,
@@ -246,4 +250,41 @@ pub async fn compute_file_hash<P: AsRef<Path>>(path: P) -> io::Result<u64> {
 
     // Return the final hash
     Ok(hasher.finish())
+}
+
+impl ChecksumReport {
+    pub fn export_report<P: AsRef<Path>>(&self, to_file: P) -> Result<(), Box<dyn Error>> {
+        let file = std::fs::File::create(to_file)?;
+        let mut writer = Writer::from_writer(file);
+        let mut header: Vec<String> = vec![
+            "Consistent".to_owned(),
+            "Source".to_owned(),
+            "Source Hash".to_owned(),
+        ];
+        let row0 = &self.0[0];
+        for i in 0..row0.destinations.len() {
+            header.push(format!("Destination File {}", i + 1));
+            header.push(format!("Destination Hash {}", i + 1));
+        }
+        writer.write_record(header)?;
+
+        for row in &self.0 {
+            let mut record: Vec<String> = vec![
+                if row.consistent() {
+                    "Y".to_owned()
+                } else {
+                    "N".to_owned()
+                },
+                row.source.0.to_string_lossy().into_owned(),
+                format!("{:X}", row.source.1).to_owned(),
+            ];
+            for dest in &row.destinations {
+                record.push(dest.0.to_string_lossy().into_owned());
+                record.push(format!("{:X}", dest.1).to_owned());
+            }
+            writer.write_record(record)?;
+        }
+        writer.flush()?;
+        Ok(())
+    }
 }
